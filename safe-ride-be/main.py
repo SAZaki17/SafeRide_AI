@@ -1,185 +1,142 @@
-# WHEN-RAIN-BE/main.py
-
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 import os
-import datetime
-import time 
-import asyncio # <--- ADDED for concurrent API calls
-from typing import List
-
-# Import Pydantic models and service functions
+import asyncio
+from typing import Optional, List
+from fastapi import FastAPI, HTTPException, Query, status
 from pydantic import BaseModel
-from services.maps_service import get_route_directions
-from services.places_service import get_nearby_place_name # <--- NEW SERVICE IMPORT
+from dotenv import load_dotenv
 
-# --- Pydantic Models ---
+# Load environment variables (must be first)
+load_dotenv()
 
-class RouteSegment(BaseModel):
-    """Data structure for one weather-aware segment of the route."""
-    # Location data
+# --- SERVICES IMPORT ---
+# Note: Ensure all these service files are using the Python 'typing' imports:
+# from typing import Optional, List, Dict, Any, Tuple
+from services import maps_service
+from services import places_service
+from services.weather_service import get_weather_forecast, WeatherForecast
+
+# --- MODELS ---
+# The Pydantic model for a single segment of the route
+class Segment(BaseModel):
     lat: float
     lng: float
-    place_name: str = "Traveling" # <--- NEW FIELD
-    
-    # Time data
-    eta_timestamp: int  # Time in seconds since epoch (UNIX timestamp)
+    eta_timestamp: int
     human_readable_time: str
-    
-    # Placeholder for weather data (Step 3)
-    weather_condition: str = "Pending"
-    weather_icon: str = ""
+    place_name: str
+    # NEW fields for weather data
+    weather_condition: str = "N/A"
+    weather_icon: str = "N/A"
+    temperature: float = 0.0
+    risk_score: int = 0  # Added field to align with weather_service.py
 
+# The Pydantic model for the final response
 class SegmentedRouteResponse(BaseModel):
-    """The full response structure returned to the frontend."""
     start_time: str
     total_duration_seconds: int
-    segments: List[RouteSegment]
+    polyline_encoded: str
+    segments: List[Segment]
 
-# ---------------------------------------------
-
-# --- Configuration & Initialization ---
-
-# 1. Load environment variables FIRST
-load_dotenv() 
-
-# 2. Read the API key
-MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
-# OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY") # Will be used in Step 3
-
-app = FastAPI(title="Weather Navigation Backend")
-
-# CORS Configuration
-origins = ["http://localhost:8080", "http://127.0.0.1:8080"]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+# --- FASTAPI APP INITIALIZATION ---
+app = FastAPI(
+    title="Weather Navigation Backend",
+    description="Provides segmented route data integrated with place names and weather forecasts.",
 )
 
-# --- Helper Function for Segmentation and Timing (Step 2 Logic) ---
-
-def segment_and_time_route(route_data: dict, start_time_iso: str) -> SegmentedRouteResponse:
-    """
-    Processes the raw Google Maps steps to create time-aware route segments.
-    """
-    
-    departure_time = datetime.datetime.fromisoformat(start_time_iso)
-    current_time_ms = time.time()
-    
-    segments_list = []
-    accumulated_duration = 0
-    
-    steps = route_data.get('steps', [])
-    total_duration_seconds = route_data.get('duration_seconds', 0)
-    
-    if not steps:
-        return SegmentedRouteResponse(
-            start_time=departure_time.strftime("%Y-%m-%d %I:%M:%S %p"),
-            total_duration_seconds=0,
-            segments=[]
-        )
-
-    # 1. Add the very START POINT (Point 1)
-    start_lat = steps[0]['start_location']['lat']
-    start_lng = steps[0]['start_location']['lng']
-
-    segments_list.append(
-        RouteSegment(
-            lat=start_lat,
-            lng=start_lng,
-            eta_timestamp=int(current_time_ms), 
-            human_readable_time=departure_time.strftime("%I:%M %p")
-        )
-    )
-    
-    # 2. Iterate through all subsequent steps (intermediate points)
-    for step in steps:
-        step_duration = step['duration']['value']
-        accumulated_duration += step_duration
-        
-        segment_lat = step['end_location']['lat']
-        segment_lng = step['end_location']['lng']
-        
-        eta_datetime = departure_time + datetime.timedelta(seconds=accumulated_duration)
-        eta_timestamp = int(eta_datetime.timestamp())
-
-        segments_list.append(
-            RouteSegment(
-                lat=segment_lat,
-                lng=segment_lng,
-                eta_timestamp=eta_timestamp,
-                human_readable_time=eta_datetime.strftime("%I:%M %p")
-            )
-        )
-        
-    return SegmentedRouteResponse(
-        start_time=departure_time.strftime("%Y-%m-%d %I:%M:%S %p"),
-        total_duration_seconds=total_duration_seconds,
-        segments=segments_list
-    )
-
-
-# --- Endpoint Definition (Step 1, 2, and Place Name Execution) ---
-
-@app.get("/api/route", response_model=SegmentedRouteResponse)
+# --- COORDINATOR ROUTE ---
+@app.get(
+    "/api/route", 
+    response_model=SegmentedRouteResponse,
+    summary="Get route segments with real-time place names and weather",
+    status_code=status.HTTP_200_OK
+)
 async def get_route(
-    origin: str, 
-    destination: str,
-    departure_time: str = Query(None, description="ISO 8601 formatted datetime for departure.") 
+    origin: str = Query(..., description="Starting point for the route"),
+    destination: str = Query(..., description="End point for the route"),
+    departure_time: Optional[str] = Query(None, description="ISO 8601 timestamp (e.g., 2025-12-07T14:00:00+08:00)")
 ):
-    """
-    Calculates the driving route, segments it, estimates arrival times, and fetches nearby place names.
-    """
-    
-    # Check 1: Ensure the API key is available
-    if not MAPS_API_KEY:
-        raise HTTPException(status_code=500, detail="Server Configuration Error: Maps API Key is missing.")
-
-    # Determine departure time (use current time if none provided)
-    if departure_time is None:
-        departure_dt = datetime.datetime.now(datetime.timezone.utc).astimezone()
-        departure_time_iso = departure_dt.isoformat()
-    else:
-        try:
-            departure_dt = datetime.datetime.fromisoformat(departure_time)
-            departure_time_iso = departure_dt.isoformat()
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid departure_time format. Use ISO 8601.")
-            
-
-    # 1. Route Calculation
-    route_data = await get_route_directions(origin, destination, api_key=MAPS_API_KEY) 
-    
-    if route_data is None:
-        raise HTTPException(status_code=404, detail="No route could be found or an external API error occurred.")
-
-    # 2. Segmentation and Time Estimation 
-    segmented_route = segment_and_time_route(route_data, departure_time_iso)
-
-    # 3. Place Name Integration (Concurrent API calls)
-    
-    place_name_tasks = [] 
-    
-    for segment in segmented_route.segments:
-        # Create a task for each segment to fetch the nearby place name
-        place_task = get_nearby_place_name(
-            lat=segment.lat,
-            lng=segment.lng,
-            api_key=MAPS_API_KEY # Reusing the Google API Key
+    try:
+        # STEP 1: Get the route and segments from Maps Service
+        route_segments, raw_response = await maps_service.get_segmented_route(
+            origin, destination, departure_time
         )
-        place_name_tasks.append(place_task)
+        
+        # Ensure we have segments before proceeding
+        if not route_segments or 'routes' not in raw_response:
+             raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, 
+                detail="No route could be found or an external API error occurred."
+            )
 
-    # Wait for all place name API calls to complete concurrently
-    place_name_results = await asyncio.gather(*place_name_tasks)
+        # Safely extract core route data from the first leg
+        leg = raw_response['routes'][0]['legs'][0]
+        
+        # --- CRITICAL FIX FOR 'departure_time' KEYERROR ---
+        # The 'departure_time' object is only present if a specific time was requested.
+        # Fall back to "Now" if it's missing (i.e., when using the default 'now' time).
+        if 'departure_time' in leg:
+            start_time_text = leg['departure_time']['text']
+        else:
+            start_time_text = "Now"
+        # ---------------------------------------------------
 
-    # Update segments with place name data
-    for i, name in enumerate(place_name_results):
-        segmented_route.segments[i].place_name = name
+        total_duration_seconds = leg['duration']['value']
+        polyline_encoded = raw_response['routes'][0]['overview_polyline']['points']
 
-    # Weather Integration (Step 3 will go here)
+        # STEP 2 & 3: Concurrently fetch Place Names and Weather Forecasts
+        # Create a list of async tasks for Place Name lookup
+        place_name_tasks = [
+            places_service.get_place_name(segment.lat, segment.lng)
+            for segment in route_segments
+        ]
+        
+        # Create a list of async tasks for Weather lookup
+        weather_tasks = [
+            get_weather_forecast(segment.lat, segment.lng, segment.eta_timestamp)
+            for segment in route_segments
+        ]
+        
+        # Run all concurrent tasks together for maximum speed
+        results = await asyncio.gather(*place_name_tasks, *weather_tasks)
+        
+        # Split results back into their respective lists
+        num_segments = len(route_segments)
+        place_names = results[:num_segments]
+        weather_forecasts: List[WeatherForecast] = results[num_segments:]
 
-    return segmented_route
+        # STEP 4: COORDINATION - Merge all data into the final Segment models
+        final_segments: List[Segment] = []
+        for segment, place_name, weather_data in zip(
+            route_segments, place_names, weather_forecasts
+        ):
+            final_segments.append(
+                Segment(
+                    lat=segment.lat,
+                    lng=segment.lng,
+                    # Note: maps_service SegmentData's eta_timestamp is now duration_seconds
+                    eta_timestamp=segment.eta_timestamp, 
+                    human_readable_time=segment.human_readable_time,
+                    place_name=place_name,
+                    weather_condition=weather_data.description,
+                    weather_icon=weather_data.icon,
+                    temperature=weather_data.temperature,
+                    risk_score=weather_data.risk_score # Added risk_score
+                )
+            )
+
+        # STEP 5: Return the combined response
+        return SegmentedRouteResponse(
+            start_time=start_time_text,
+            total_duration_seconds=total_duration_seconds,
+            polyline_encoded=polyline_encoded,
+            segments=final_segments
+        )
+
+    except HTTPException:
+        # Re-raise explicit HTTP exceptions (like 404 from maps_service)
+        raise
+    except Exception as e:
+        print(f"Server error during processing: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An unexpected internal server error occurred. Please check API keys and service logs."
+        )
