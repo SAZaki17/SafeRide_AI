@@ -1,0 +1,4 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+httpx # Asynchronous HTTP client for fast API calls
