@@ -1,16 +1,17 @@
+import { fileURLToPath, URL } from 'node:url'
+import Vue from '@vitejs/plugin-vue'
 // Plugins
 import AutoImport from 'unplugin-auto-import/vite'
-import Components from 'unplugin-vue-components/vite'
 import Fonts from 'unplugin-fonts/vite'
-import Layouts from 'vite-plugin-vue-layouts-next'
-import Vue from '@vitejs/plugin-vue'
-import VueRouter from 'unplugin-vue-router/vite'
+import Components from 'unplugin-vue-components/vite'
 import { VueRouterAutoImports } from 'unplugin-vue-router'
-import Vuetify, { transformAssetUrls } from 'vite-plugin-vuetify'
-
+import VueRouter from 'unplugin-vue-router/vite'
 // Utilities
 import { defineConfig } from 'vite'
-import { fileURLToPath, URL } from 'node:url'
+// import { VitePWA } from 'vite-plugin-pwa'
+
+import Layouts from 'vite-plugin-vue-layouts-next'
+import Vuetify, { transformAssetUrls } from 'vite-plugin-vuetify'
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -57,6 +58,37 @@ export default defineConfig({
         ],
       },
     }),
+    // VitePWA({
+    //   registerType: 'autoUpdate',
+    //   includeAssets: ['favicon.ico'],
+    //   manifest: {
+    //     name: 'Safe Ride AI',
+    //     short_name: 'SafeRide',
+    //     start_url: '/',
+    //     display: 'standalone',
+    //     background_color: '#000000',
+    //     theme_color: '#000000',
+    //     orientation: 'portrait',
+    //     icons: [
+    //       {
+    //         src: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/Pb9EcQAAAABJRU5ErkJggg==',
+    //         sizes: '192x192',
+    //         type: 'image/png',
+    //         purpose: 'any maskable',
+    //       },
+    //       {
+    //         src: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/Pb9EcQAAAABJRU5ErkJggg==',
+    //         sizes: '512x512',
+    //         type: 'image/png',
+    //         purpose: 'any maskable',
+    //       },
+    //     ],
+    //   },
+    //   workbox: {
+    //     navigateFallback: '/index.html',
+    //     globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,webmanifest}'],
+    //   },
+    // }),
   ],
   optimizeDeps: {
     exclude: [
